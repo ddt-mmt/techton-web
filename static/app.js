@@ -1,139 +1,18 @@
-const { useState, useEffect } = React;
-
-function App() {
-  const [config, setConfig] = useState({
-    target_ip: '',
-    mode: 'load',
-    vus: 50,
-    duration: '60s',
-    user_dn: '',
-    password: '',
-    attackType: 'single', // single vs csv
-    file: null
-  });
-  const [status, setStatus] = useState({ status: 'stopped', duration: 0 });
-  const [log, setLog] = useState([]);
-  const [report, setReport] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [selectedReport, setSelectedReport] = useState(null);
-
-  const getRecommendedDuration = (vus) => {
-      if (vus <= 50) return "Min. 60s for statistical accuracy.";
-      if (vus <= 500) return "30s-60s is standard.";
-      return "30s should be sufficient for high load.";
-  };
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      fetch('/api/status')
-        .then(res => res.json())
-        .then(data => {
-            if (status.status === 'running' && data.status === 'finished') {
-                handleStop(true); // Test finished on its own, trigger report
-            }
-            setStatus(data);
-
-            if(data.status === 'running') {
-                setReport(null);
-                setLog(prev => [...prev.slice(-9), `[${new Date().toLocaleTimeString()}] Test in progress... (${data.duration}s)`]);
-            }
-        })
-        .catch(err => console.error("Poll Error:", err));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [status.status]);
-  
-  useEffect(() => {
-      fetchHistory();
-  }, []);
-
-  const fetchHistory = () => {
-      fetch('/api/reports/history')
-        .then(res => res.json())
-        .then(data => setHistory(data))
-        .catch(err => console.error("History Error:", err));
-  };
-
-  const handleStart = async () => {
-    try {
-      const formData = new FormData();
-      formData.append('target_ip', config.target_ip || '127.0.0.1'); // Use default if empty
-      formData.append('vus', config.vus);
-      formData.append('duration', config.duration);
-      formData.append('mode', config.mode);
-      if(config.attackType === 'single') {
-          formData.append('user_dn', config.user_dn);
-          formData.append('password', config.password);
-          formData.append('use_csv', 'False');
-      } else {
-          if(!config.file) { alert("Please upload a CSV file!"); return; }
-          formData.append('use_csv', 'True');
-          formData.append('csv_file', config.file);
-          formData.append('user_dn', 'dummy'); 
-          formData.append('password', 'dummy');
+  const clearHistory = async () => {
+      if (confirm("Are you sure you want to clear all report history? This action cannot be undone.")) {
+          try {
+              const res = await fetch('/api/reports/clear', { method: 'POST' });
+              if (res.ok) {
+                  fetchHistory();
+                  alert("Report history cleared.");
+              } else {
+                  alert("Failed to clear history.");
+              }
+          } catch (err) {
+              console.error(err);
+              alert("Error clearing history.");
+          }
       }
-
-      const res = await fetch('/api/start', {
-        method: 'POST',
-        body: formData 
-      });
-      
-      if(res.ok) {
-          setLog(["Initializing " + config.mode.toUpperCase() + " Vector...", "Attack Type: " + config.attackType.toUpperCase(), "Spawning Virtual Users..."]);
-          setReport(null);
-      } else {
-          const err = await res.json();
-          alert("Error: " + err.detail);
-      }
-    } catch(err) {
-      alert("Failed to start: " + err);
-    }
-  };
-
-  const handleStop = async (isAutoStop = false) => {
-    if (!isAutoStop) {
-        await fetch('/api/stop', { method: 'POST' });
-        setLog(prev => [...prev, "--- ATTACK MANUALLY ABORTED ---"]);
-    } else {
-         setLog(prev => [...prev, "--- TEST COMPLETED NORMALLY ---"]);
-    }
-    
-    setLog(prev => [...prev, "Generating Final Report..."]);
-    
-    setTimeout(async () => {
-        try {
-            const res = await fetch('/api/report');
-            if(res.ok) {
-                const data = await res.json();
-                setReport(data);
-                setLog(prev => [...prev, "REPORT GENERATED SUCCESSFULLY."]);
-                fetchHistory(); // Refresh history
-            } else {
-                setLog(prev => [...prev, "Failed to generate report."]);
-            }
-        } catch(e) {
-            setLog(prev => [...prev, "Error fetching report."]);
-        }
-    }, 1000);
-  };
-  
-  const viewReport = async (run) => {
-    const runName = run.Path.split('/').filter(Boolean).pop();
-    const target = run.Target;
-    const mode = run.Users; // In history.csv, Users column contains the mode
-    
-    try {
-      const res = await fetch(`/api/reports/view/${runName}?target=${target}&mode=${mode}`);
-      if (res.ok) {
-        const reportHtml = await res.text();
-        setSelectedReport(reportHtml);
-      } else {
-        alert("Failed to load report");
-      }
-    } catch (err) {
-      console.error(err);
-      alert("Error loading report");
-    }
   };
 
   return (
@@ -341,7 +220,15 @@ function App() {
       
       {/* History Section */}
       <div className="mt-12">
-        <h2 className="text-2xl font-bold text-green-400 mb-4">Historical Reports</h2>
+        <div className="flex justify-between items-center mb-4">
+            <h2 className="text-2xl font-bold text-green-400">Historical Reports</h2>
+            <div className="flex items-center gap-4">
+                <p className="text-sm text-slate-400">Showing last 100 runs</p>
+                <button onClick={clearHistory} className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold py-1 px-3 rounded">
+                    Clear History
+                </button>
+            </div>
+        </div>
         <div className="bg-slate-800 rounded-lg cyber-border overflow-hidden">
             <table className="w-full text-sm text-left">
                 <thead className="bg-slate-900 text-xs text-slate-400 uppercase">
@@ -373,6 +260,11 @@ function App() {
                             </td>
                         </tr>
                     ))}
+                     {history.length === 0 && (
+                        <tr>
+                            <td colSpan="7" className="text-center p-8 text-slate-500">No historical data available.</td>
+                        </tr>
+                    )}
                 </tbody>
             </table>
         </div>

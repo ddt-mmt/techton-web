@@ -76,10 +76,25 @@ async def get_reports_history():
     history = []
     with open(history_file, 'r') as f:
         reader = csv.DictReader(f)
-        for row in reader:
-            history.append(row)
+        history = list(reader)
+    
+    # Reverse and limit to 100
+    history.reverse()
+    paginated_history = history[:100]
             
-    return JSONResponse(content=history)
+    return JSONResponse(content=paginated_history)
+
+@app.post("/api/reports/clear")
+async def clear_reports():
+    history_file = "../techton-project/results/history.csv"
+    header = "Timestamp,Target,Users,Duration,AvgLatency,Errors,Status,Path\n"
+    
+    try:
+        with open(history_file, 'w') as f:
+            f.write(header)
+        return {"status": "cleared"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear history: {str(e)}")
 
 @app.get("/api/reports/view/{run_name}", response_class=HTMLResponse)
 async def get_report_view(run_name: str, target: str, mode: str):
