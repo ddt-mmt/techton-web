@@ -1,3 +1,157 @@
+const { useState, useEffect } = React;
+
+function App() {
+  const [config, setConfig] = useState({
+    target_ip: '',
+    mode: 'load',
+    vus: 50,
+    duration: '60s',
+    user_dn: '',
+    password: '',
+    attackType: 'single', // single vs csv
+    file: null
+  });
+  const [status, setStatus] = useState({ status: 'stopped', duration: 0 });
+  const [log, setLog] = useState([]);
+  const [report, setReport] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [selectedReport, setSelectedReport] = useState(null);
+
+  const getRecommendedDuration = (vus) => {
+      if (vus <= 50) return "Min. 60s for statistical accuracy.";
+      if (vus <= 500) return "30s-60s is standard.";
+      return "30s should be sufficient for high load.";
+  };
+
+  useEffect(() => {
+    const ws_protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${ws_protocol}//${window.location.host}/ws/status`);
+    
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (status.status === 'running' && data.status === 'finished') {
+            handleStop(true); // Test finished on its own, trigger report
+        }
+        setStatus(data);
+
+        if(data.status === 'running') {
+            setReport(null);
+            setLog(prev => [...prev.slice(-9), `[${new Date().toLocaleTimeString()}] Test in progress... (${data.duration}s)`]);
+        }
+    };
+
+    ws.onclose = () => {
+        console.log("WebSocket disconnected.");
+        // The backend will handle the test stop.
+        // Optionally, you can update the UI to reflect the disconnection.
+        setStatus({ status: 'stopped', duration: 0 });
+    };
+    
+    ws.onerror = (error) => {
+        console.error("WebSocket Error:", error);
+        // Maybe show an error to the user
+    };
+
+    return () => {
+        ws.close();
+    };
+  }, [status.status]);
+  
+  useEffect(() => {
+      fetchHistory();
+  }, []);
+
+  const fetchHistory = () => {
+      fetch('/api/reports/history')
+        .then(res => res.json())
+        .then(data => setHistory(data))
+        .catch(err => console.error("History Error:", err));
+  };
+
+  const handleStart = async () => {
+    try {
+      const formData = new FormData();
+      formData.append('target_ip', config.target_ip || '127.0.0.1'); // Use default if empty
+      formData.append('vus', config.vus);
+      formData.append('duration', config.duration);
+      formData.append('mode', config.mode);
+      if(config.attackType === 'single') {
+          formData.append('user_dn', config.user_dn);
+          formData.append('password', config.password);
+          formData.append('use_csv', 'False');
+      } else {
+          if(!config.file) { alert("Please upload a CSV file!"); return; }
+          formData.append('use_csv', 'True');
+          formData.append('csv_file', config.file);
+          formData.append('user_dn', 'dummy'); 
+          formData.append('password', 'dummy');
+      }
+
+      const res = await fetch('/api/start', {
+        method: 'POST',
+        body: formData 
+      });
+      
+      if(res.ok) {
+          setLog(["Initializing " + config.mode.toUpperCase() + " Vector...", "Attack Type: " + config.attackType.toUpperCase(), "Spawning Virtual Users..."]);
+          setReport(null);
+      } else {
+          const err = await res.json();
+          alert("Error: " + err.detail);
+      }
+    } catch(err) {
+      alert("Failed to start: " + err);
+    }
+  };
+
+  const handleStop = async (isAutoStop = false) => {
+    if (!isAutoStop) {
+        await fetch('/api/stop', { method: 'POST' });
+        setLog(prev => [...prev, "--- ATTACK MANUALLY ABORTED ---"]);
+    } else {
+         setLog(prev => [...prev, "--- TEST COMPLETED NORMALLY ---"]);
+    }
+    
+    setLog(prev => [...prev, "Generating Final Report..."]);
+    
+    setTimeout(async () => {
+        try {
+            const res = await fetch('/api/report');
+            if(res.ok) {
+                const data = await res.json();
+                setReport(data);
+                setLog(prev => [...prev, "REPORT GENERATED SUCCESSFULLY."]);
+                fetchHistory(); // Refresh history
+            } else {
+                setLog(prev => [...prev, "Failed to generate report."]);
+            }
+        } catch(e) {
+            setLog(prev => [...prev, "Error fetching report."]);
+        }
+    }, 1000);
+  };
+  
+  const viewReport = async (run) => {
+    const runName = run.Path.split('/').filter(Boolean).pop();
+    const target = run.Target;
+    const mode = run.Users;
+    const vus = runName.split('_').pop().replace('u', '');
+    const duration = run.Duration;
+    
+    try {
+      const res = await fetch(`/api/reports/view/${runName}?target=${target}&mode=${mode}&vus=${vus}&duration=${duration}s`);
+      if (res.ok) {
+        const reportHtml = await res.text();
+        setSelectedReport(reportHtml);
+      } else {
+        alert("Failed to load report");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error loading report");
+    }
+  };
+
   const clearHistory = async () => {
       if (confirm("Are you sure you want to clear all report history? This action cannot be undone.")) {
           try {

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -6,6 +6,7 @@ import os
 import shutil
 import csv
 import subprocess
+import asyncio
 from backend.runner import runner
 from typing import Optional
 
@@ -97,7 +98,7 @@ async def clear_reports():
         raise HTTPException(status_code=500, detail=f"Failed to clear history: {str(e)}")
 
 @app.get("/api/reports/view/{run_name}", response_class=HTMLResponse)
-async def get_report_view(run_name: str, target: str, mode: str):
+async def get_report_view(run_name: str, target: str, mode: str, vus: str, duration: str):
     run_dir = f"../techton-project/results/{run_name}"
     csv_file = f"{run_dir}/k6_results.csv" # Assuming this is the name of the file
     report_file = f"{run_dir}/report.html"
@@ -115,7 +116,7 @@ async def get_report_view(run_name: str, target: str, mode: str):
 
 
     cmd = [
-        "python3", report_gen_script, csv_file, target, mode, report_file
+        "python3", report_gen_script, csv_file, target, mode, report_file, vus, duration
     ]
     
     try:
@@ -129,6 +130,14 @@ async def get_report_view(run_name: str, target: str, mode: str):
     with open(report_file, "r") as f:
         return f.read()
 
-@app.get("/api/status")
-async def get_status():
-    return runner.get_status()
+@app.websocket("/ws/status")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(runner.get_status())
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        print("Client disconnected. Stopping test if running.")
+        if runner.is_running():
+            runner.stop_test()
