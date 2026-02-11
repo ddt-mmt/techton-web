@@ -174,7 +174,7 @@ class TestRunner:
         if self.current_config.get("mode") == "audit":
             # Override for audit
             score = "D"
-            recommendations.append("Audit Found: Anonymous Bind Enabled (Security Risk)."]
+            recommendations.append("Audit Found: Anonymous Bind Enabled (Security Risk).")
 
         return {
             "summary": status_msg,
