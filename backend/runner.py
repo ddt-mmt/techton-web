@@ -12,6 +12,7 @@ class TestRunner:
         self.current_config = {}
         self.start_time = None
         self.report_start_time = None
+        self.manual_stop = False
         self.log_file = "k6_output.json"
         self.k6_path = os.path.abspath("../techton-project/bin/k6") # Fallback
         if not os.path.exists(self.k6_path):
@@ -31,6 +32,7 @@ class TestRunner:
         self.start_time = datetime.now()
         self.report_start_time = None
         self.report_ready = False # Reset report state
+        self.manual_stop = False
         
         # 1. Prepare Script
         script_content = self._prepare_script(config)
@@ -53,8 +55,9 @@ class TestRunner:
         )
         return True
 
-    def stop_test(self):
+    def stop_test(self, manual=False):
         if self.process and self.is_running():
+            self.manual_stop = manual
             # Graceful stop first
             self.process.terminate()
             try:
@@ -145,13 +148,17 @@ class TestRunner:
         target = self.current_config.get("target_ip", "Unknown")
         
         # Did it die early? (Allowing 2s buffer for startup/teardown)
-        premature_stop = actual_duration < (planned_duration - 5)
+        premature_stop = actual_duration < (planned_duration - 5) and not self.manual_stop
         
         score = "B+"
         recommendations = []
         status_msg = "TEST COMPLETED SUCCESSFULLY"
-        
-        if premature_stop:
+
+        if self.manual_stop:
+            status_msg = f"Test manually stopped after {actual_duration}s."
+            recommendations.append("Test was stopped by the user before completion.")
+            score = "N/A"
+        elif premature_stop:
             score = "F"
             status_msg = f"SERVER DOWN (Collapsed at {actual_duration}s)"
             recommendations.append(f"CRITICAL: Server collapsed after {actual_duration} seconds.")
@@ -167,7 +174,7 @@ class TestRunner:
         if self.current_config.get("mode") == "audit":
             # Override for audit
             score = "D"
-            recommendations = ["Audit Found: Anonymous Bind Enabled (Security Risk)."]
+            recommendations.append("Audit Found: Anonymous Bind Enabled (Security Risk)."]
 
         return {
             "summary": status_msg,

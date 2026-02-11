@@ -57,7 +57,7 @@ async def start_test(
 
 @app.post("/api/stop")
 async def stop_test():
-    if runner.stop_test():
+    if runner.stop_test(manual=True):
         return {"status": "stopped"}
     return {"status": "not running"}
 

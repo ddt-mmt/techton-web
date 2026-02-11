@@ -29,10 +29,13 @@ function App() {
     
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        if (status.status === 'running' && data.status === 'finished') {
-            handleStop(true); // Test finished on its own, trigger report
-        }
-        setStatus(data);
+        
+        setStatus(prevStatus => {
+            if (prevStatus.status === 'running' && data.status === 'finished') {
+                handleStop(true); // Test finished on its own, trigger report
+            }
+            return data;
+        });
 
         if(data.status === 'running') {
             setReport(null);
@@ -42,20 +45,17 @@ function App() {
 
     ws.onclose = () => {
         console.log("WebSocket disconnected.");
-        // The backend will handle the test stop.
-        // Optionally, you can update the UI to reflect the disconnection.
         setStatus({ status: 'stopped', duration: 0 });
     };
     
     ws.onerror = (error) => {
         console.error("WebSocket Error:", error);
-        // Maybe show an error to the user
     };
 
     return () => {
         ws.close();
     };
-  }, [status.status]);
+  }, []);
   
   useEffect(() => {
       fetchHistory();
