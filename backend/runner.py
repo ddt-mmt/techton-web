@@ -15,10 +15,20 @@ class TestRunner:
         self.report_start_time = None
         self.manual_stop = False
         self.log_file = "k6_output.json"
+        self.run_log_file = "k6_run.log" # Log for k6 stdout/stderr
         self.last_report = None
-        self.k6_path = os.path.abspath("../techton-project/bin/k6") # Fallback
+        
+        # Robust path finding
+        base_dir = os.path.dirname(os.path.abspath(__file__)) # techton-web/backend
+        project_root = os.path.dirname(os.path.dirname(base_dir)) # techton-web/.. -> gemini-cli/
+        
+        # Expected path: techton-project/bin/k6
+        # If runner.py is in techton-web/backend, then techton-project is in ../../techton-project relative to runner.py
+        self.k6_path = os.path.join(base_dir, "../../techton-project/bin/k6")
+        self.k6_path = os.path.normpath(self.k6_path)
+
         if not os.path.exists(self.k6_path):
-             # Try system k6
+             print(f"Warning: Custom k6 not found at {self.k6_path}. Fallback to system k6.")
              self.k6_path = "k6"
 
     def is_running(self):
@@ -37,23 +47,46 @@ class TestRunner:
         self.manual_stop = False
         self.last_report = None
         
-        # 1. Prepare Script
+        # 1. Prepare Run Directory
+        vus = config.get("vus", 0)
+        run_name = f"run_{self.start_time.strftime('%Y-%m-%d_%H-%M-%S')}_{vus}u"
+        
+        # Absolute path to results dir
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        results_root = os.path.join(base_dir, "../../techton-project/results")
+        self.run_dir = os.path.join(results_root, run_name)
+        
+        os.makedirs(self.run_dir, exist_ok=True)
+        
+        # Define outputs
+        self.run_csv = os.path.join(self.run_dir, "k6_metrics.csv")
+        self.run_json = os.path.join(self.run_dir, "k6_summary.json")
+        
+        # 2. Prepare Script
         script_content = self._prepare_script(config)
-        script_path = "temp_run.js"
+        script_path = os.path.join(self.run_dir, "load_test.js")
         with open(script_path, "w") as f:
             f.write(script_content)
             
-        # 2. Run K6
+        # 3. Run K6
+        # We output CSV for the detailed report generator and JSON for the live summary if needed
         cmd = [
             self.k6_path, "run", 
-            "--out", f"json={self.log_file}",
+            "--out", f"csv={self.run_csv}",
+            "--out", f"json={self.log_file}", # Keep the main log file for the live dashboard (flushed often)
             script_path
         ]
         
+        # Open log file for append
+        self.log_handle = open(self.run_log_file, "a")
+        self.log_handle.write(f"\n--- Starting Run {run_name} ---\n")
+        self.log_handle.write(f"Command: {' '.join(cmd)}\n")
+        self.log_handle.flush()
+
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=self.log_handle,
+            stderr=subprocess.STDOUT,
             text=True
         )
         return True
@@ -68,6 +101,11 @@ class TestRunner:
             except subprocess.TimeoutExpired:
                 self.process.kill()
             self.process = None
+            
+            # Close log handle
+            if hasattr(self, 'log_handle') and self.log_handle:
+                self.log_handle.close()
+                self.log_handle = None
             
             if self.start_time:
                 self.report_start_time = self.start_time
@@ -92,21 +130,31 @@ class TestRunner:
         else:
             template_path = "backend/scripts/ad_load.js"
 
-        if not os.path.exists(template_path):
+        # Fix relative path read
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        abs_template_path = os.path.join(base_dir, "../../techton-web", template_path)
+        
+        if not os.path.exists(abs_template_path):
              # Fallback
-             template_path = f"techton-web/{template_path}"
+             abs_template_path = template_path
 
-        with open(template_path, "r") as f:
+        with open(abs_template_path, "r") as f:
             template = f.read()
             
         # Replacements
         target = config.get("target_ip", "127.0.0.1")
         vus = config.get("vus", 10)
         duration = config.get("duration", "30s")
-        dn = config.get("user_dn") or "guest"
-        password = config.get("password") or "guest"
+        
+        # Escape backslashes for JS string literals
+        raw_dn = config.get("user_dn") or "guest"
+        dn = str(raw_dn).replace("\\", "\\\\")
+        
+        raw_pass = config.get("password") or "guest"
+        password = str(raw_pass).replace("\\", "\\\\")
         
         use_csv = str(config.get("use_csv", False)).lower()
+        base_dn = config.get("base_dn") or ""
         
         # Scenario Construction
         scenario = f"""
@@ -134,11 +182,13 @@ class TestRunner:
         script = script.replace("__SCENARIO_BODY__", scenario)
         script = script.replace("__THRESHOLDS_BODY__", thresholds)
         script = script.replace("__USE_CSV__", use_csv)
+        script = script.replace("__BASE_DN__", base_dn)
 
         return script
 
     def _save_to_history(self, report):
         history_file = "../techton-project/results/history.csv"
+        # Ensure dir exists (relative to where app starts, usually techton-web)
         if not os.path.exists(os.path.dirname(history_file)):
             os.makedirs(os.path.dirname(history_file), exist_ok=True)
 
@@ -152,10 +202,17 @@ class TestRunner:
                 if not file_exists:
                     writer.writeheader()
                 
-                # Create a run directory name
-                run_name = f"run_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{report['stats']['peak_vus']}u"
-                run_path = f"results/{run_name}"
+                # Path stored in history should be relative or absolute, let's use the one we created
+                run_path = getattr(self, 'run_dir', 'results/unknown')
                 
+                # Normalize path for the frontend (assumes techton-project structure)
+                # If run_dir is /usr/lib/.../techton-project/results/run_X
+                # We want results/run_X
+                if "results" in run_path:
+                    clean_path = "results" + run_path.split("results")[-1]
+                else:
+                    clean_path = run_path
+
                 writer.writerow({
                     "Timestamp": report["timestamp"],
                     "Target": report["target"],
@@ -164,7 +221,7 @@ class TestRunner:
                     "AvgLatency": report["stats"]["avg_latency"],
                     "Errors": report["stats"]["error_rate"],
                     "Status": "PASS" if report["score"] != "F" else "FAIL",
-                    "Path": run_path
+                    "Path": clean_path
                 })
         except Exception as e:
             print(f"Error saving to history: {e}")
@@ -238,6 +295,30 @@ class TestRunner:
         return self.last_report
 
     def get_status(self):
+        logs = []
+        if self.run_log_file and os.path.exists(self.run_log_file):
+            try:
+                # Read last few lines for real-time feedback
+                with open(self.run_log_file, "r") as f:
+                    # Simple tail implementation
+                    # Seek to end and read back a bit, or just read all if small.
+                    # Since logs rotate per run (we append), it might get big. 
+                    # Let's just read the last 2KB.
+                    f.seek(0, os.SEEK_END)
+                    file_size = f.tell()
+                    seek_offset = 2000
+                    if file_size > seek_offset:
+                        f.seek(file_size - seek_offset)
+                    else:
+                        f.seek(0)
+                    
+                    content = f.read()
+                    lines = content.split('\n')
+                    # Filter empty lines and take last 3 non-empty
+                    logs = [l for l in lines if l.strip()][-3:]
+            except Exception:
+                pass
+
         if not self.is_running():
             # If it was running but has now stopped, the test is over.
             if self.start_time is not None:
@@ -250,14 +331,15 @@ class TestRunner:
                 if report:
                     self._save_to_history(report)
                     
-                return {"status": "finished"}
-            return {"status": "stopped"}
+                return {"status": "finished", "logs": logs}
+            return {"status": "stopped", "logs": logs}
         
         # Still running
         return {
             "status": "running",
             "pid": self.process.pid,
-            "duration": (datetime.now() - self.start_time).seconds
+            "duration": (datetime.now() - self.start_time).seconds,
+            "logs": logs
         }
 
 runner = TestRunner()

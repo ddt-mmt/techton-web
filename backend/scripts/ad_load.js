@@ -7,6 +7,7 @@ const target_ip = '__TARGET_IP__';
 const use_csv = __USE_CSV__; 
 const single_user_dn = '__USER_DN__';
 const single_password = '__PASSWORD__';
+const override_base_dn = '__BASE_DN__';
 
 export const options = {
   scenarios: {
@@ -40,22 +41,73 @@ export default function () {
         client.bind(dn, pass);
         bind_success = true;
     } catch(err) {
-         // Expected for wrong password/stress
+        if (__ITER === 0) {
+            console.error(`Bind Failed for user ${dn}: ${err}`);
+        }
     }
 
     check(bind_success, {
       'bind success': (ok) => ok === true,
     });
     
-    // 3. Search (Load Simulation)
-    // Simple search to stress the DB
+    if (!bind_success) {
+        if (client) try { client.close(); } catch(e) {}
+        sleep(2); 
+        return;
+    }
+    
+    // 3. Search (Aggressive Load Simulation)
+    // We perform multiple searches per connection to stress the CPU
+    let searchBase = override_base_dn;
+    
+    if (!searchBase) {
+        if (dn.includes("DC=")) {
+            // If user provided a full DN, use its parent as base
+            searchBase = dn.split(',').slice(1).join(',');
+        } else {
+            // Auto-Discovery via RootDSE
+            try {
+                 const rootDSE = client.search({
+                    baseDN: "",
+                    scope: ldap.ScopeBaseObject,
+                    filter: "(objectClass=*)",
+                    attributes: ["defaultNamingContext"]
+                 });
+                 
+                 if (rootDSE && rootDSE.length > 0) {
+                     // Extract defaultNamingContext
+                     for (let entry of rootDSE) {
+                        for (let attr of entry.attributes) {
+                            if (attr.name === "defaultNamingContext" && attr.values.length > 0) {
+                                searchBase = attr.values[0];
+                                break;
+                            }
+                        }
+                     }
+                 }
+            } catch(e) {
+                if (__ITER === 0) console.error("Auto-Discovery Failed: " + e);
+            }
+            
+            // Final Fallback
+            if (!searchBase) searchBase = "DC=net,DC=brin,DC=go,DC=id";
+        }
+    }
+
+    // Log the BaseDN being used (once per VU)
+    if (__ITER === 0) {
+        console.log(`Using Search Base: ${searchBase}`);
+    }
+
     try {
-        client.search({
-            baseDN: dn.split(',').slice(1).join(','),
-            scope: ldap.ScopeSingleLevel,
-            filter: "(objectClass=*)",
-            attributes: ["dn"] // Minimal retrieval
-        });
+        for (let i = 0; i < 20; i++) {
+            client.search({
+                baseDN: searchBase,
+                scope: ldap.ScopeWholeSubtree, // Recursive search is much heavier
+                filter: "(objectClass=*)",
+                attributes: ["dn", "cn", "sAMAccountName"] 
+            });
+        }
     } catch(err) {}
 
   } catch (e) {
@@ -66,5 +118,6 @@ export default function () {
     }
   }
   
-  sleep(Math.random() * 0.5 + 0.1); 
+  // Minimal sleep to allow connection cycling but keep load high
+  sleep(0.1); 
 }

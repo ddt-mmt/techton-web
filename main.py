@@ -26,6 +26,7 @@ async def start_test(
     vus: int = Form(...),
     duration: str = Form(...),
     mode: str = Form(...),
+    base_dn: Optional[str] = Form(None), # New field
     user_dn: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
     use_csv: bool = Form(False),
@@ -37,6 +38,7 @@ async def start_test(
             "vus": vus,
             "duration": duration,
             "mode": mode,
+            "base_dn": base_dn, # Pass it
             "user_dn": user_dn,
             "password": password,
             "use_csv": use_csv,
@@ -100,20 +102,44 @@ async def clear_reports():
 @app.get("/api/reports/view/{run_name}", response_class=HTMLResponse)
 async def get_report_view(run_name: str, target: str, mode: str, vus: str, duration: str):
     run_dir = f"../techton-project/results/{run_name}"
-    csv_file = f"{run_dir}/k6_results.csv" # Assuming this is the name of the file
+    csv_file = f"{run_dir}/k6_metrics.csv"
     report_file = f"{run_dir}/report.html"
     report_gen_script = "../techton-project/bin/report_gen.py"
 
+    # Helper for error page
+    def error_page(title, message):
+        return f"""
+        <html>
+        <head>
+            <style>
+                body {{ background-color: #0f172a; color: #94a3b8; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+                .container {{ text-align: center; max-width: 500px; padding: 2rem; border: 1px solid #334155; border-radius: 8px; background: #1e293b; }}
+                h1 {{ color: #ef4444; margin-bottom: 1rem; }}
+                p {{ line-height: 1.5; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>{title}</h1>
+                <p>{message}</p>
+            </div>
+        </body>
+        </html>
+        """
+
     if not os.path.exists(run_dir):
-        raise HTTPException(status_code=404, detail="Run directory not found.")
+        return error_page("Report Not Available", 
+                          "The raw data for this test run was not preserved. This is likely a legacy run from an older version of Techton.")
 
-    # Since there is no csv file in the run directories, I'll create a dummy one for the sake of the example.
-    # In a real scenario, the k6 run should output a csv file.
+    # If report exists, return it
+    if os.path.exists(report_file):
+        with open(report_file, "r") as f:
+            return f.read()
+
+    # Check for CSV
     if not os.path.exists(csv_file):
-        with open(csv_file, "w") as f:
-            f.write("timeStamp,elapsed,label,responseCode,responseMessage,threadName,dataType,success,failureMessage\n")
-            f.write("1644681600000,100,request,200,OK,thread-1,text,true,\n")
-
+         return error_page("Data Missing", 
+                           "The metrics file (k6_metrics.csv) for this run could not be found. The test might have been interrupted or failed to start correctly.")
 
     cmd = [
         "python3", report_gen_script, csv_file, target, mode, report_file, vus, duration
@@ -122,10 +148,10 @@ async def get_report_view(run_name: str, target: str, mode: str, vus: str, durat
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate report: {e.stderr}")
+        return error_page("Generation Failed", f"Failed to generate report.<br><pre style='text-align:left; bg-color:black; padding:10px; overflow:auto;'>{e.stderr}</pre>")
 
     if not os.path.exists(report_file):
-        raise HTTPException(status_code=404, detail="Report file not found after generation.")
+        return error_page("Unknown Error", "Report generation appeared to succeed but no file was created.")
 
     with open(report_file, "r") as f:
         return f.read()

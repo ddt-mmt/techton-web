@@ -1,13 +1,5 @@
-# Python
 __pycache__/
-*.pyc
-
-# Logs and Outputs
-*.log
-k6_output.json
-temp_run.js
+k6_run.log
 users.csv
-*.csv
-
-# Reports
-/techton-project/results/**/*.html
+temp_run.js
+server.log

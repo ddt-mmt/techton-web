@@ -8,6 +8,7 @@ function App() {
     duration: '60s',
     user_dn: '',
     password: '',
+    base_dn: '', // New field
     attackType: 'single', // single vs csv
     file: null
   });
@@ -37,9 +38,24 @@ function App() {
             return data;
         });
 
-        if(data.status === 'running') {
-            setReport(null);
-            setLog(prev => [...prev.slice(-9), `[${new Date().toLocaleTimeString()}] Test in progress... (${data.duration}s)`]);
+        // Live Log Updates from Backend (k6 output)
+        if (data.logs && data.logs.length > 0) {
+            setLog(prev => {
+                const newLogs = data.logs.filter(l => !prev.includes(l));
+                if (newLogs.length > 0) {
+                    return [...prev.slice(-15), ...newLogs];
+                }
+                return prev;
+            });
+        } else if(data.status === 'running') {
+            // Only add timestamp tick if no real logs
+            setLog(prev => {
+                const lastMsg = prev[prev.length - 1];
+                if (!lastMsg || !lastMsg.includes("Test in progress")) {
+                     return [...prev.slice(-9), `[${new Date().toLocaleTimeString()}] Test in progress... (${data.duration}s)`];
+                }
+                return prev; // Avoid spamming "Test in progress" every second
+            });
         }
     };
 
@@ -75,6 +91,7 @@ function App() {
       formData.append('vus', config.vus);
       formData.append('duration', config.duration);
       formData.append('mode', config.mode);
+      formData.append('base_dn', config.base_dn); // Add Base DN
       if(config.attackType === 'single') {
           formData.append('user_dn', config.user_dn);
           formData.append('password', config.password);
@@ -182,17 +199,151 @@ function App() {
       }
   };
 
+  // --- Trend Analysis Logic ---
+  const [chartInstance, setChartInstance] = useState(null);
+  const [trendFilter, setTrendFilter] = useState({
+      ip: 'All',
+      startDate: '',
+      endDate: ''
+  });
+
+  const getUniqueIPs = () => {
+      const ips = new Set(history.map(h => h.Target));
+      return ['All', ...Array.from(ips)];
+  };
+
+  useEffect(() => {
+      if (history.length === 0) return;
+      renderChart();
+  }, [history, trendFilter]);
+
+  const renderChart = () => {
+      const ctx = document.getElementById('trendChart');
+      if (!ctx) return;
+
+      if (chartInstance) chartInstance.destroy();
+
+      // Filter Data
+      let data = history.filter(h => {
+          let matchIp = trendFilter.ip === 'All' || h.Target === trendFilter.ip;
+          let date = new Date(h.Timestamp);
+          let matchStart = !trendFilter.startDate || date >= new Date(trendFilter.startDate);
+          let matchEnd = !trendFilter.endDate || date <= new Date(trendFilter.endDate + 'T23:59:59');
+          return matchIp && matchStart && matchEnd;
+      });
+
+      // Sort by date ascending for the chart
+      data.sort((a, b) => new Date(a.Timestamp) - new Date(b.Timestamp));
+
+      const labels = data.map(h => h.Timestamp);
+      const vus = data.map(h => parseInt(h.Users));
+      
+      // Parse duration "60s / 60s" -> take the first part (actual survival)
+      const durations = data.map(h => {
+          let d = h.Duration.split('/')[0].replace('s', '').trim();
+          return parseInt(d);
+      });
+
+      const newChart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+              labels: labels,
+              datasets: [
+                  {
+                      label: 'Virtual Users (Load)',
+                      data: vus,
+                      backgroundColor: 'rgba(56, 189, 248, 0.5)', // Blue
+                      borderColor: '#38bdf8',
+                      borderWidth: 1,
+                      yAxisID: 'y'
+                  },
+                  {
+                      label: 'Survival Time (Sec)',
+                      data: durations,
+                      type: 'line',
+                      borderColor: '#22c55e', // Green
+                      backgroundColor: 'rgba(34, 197, 94, 0.2)',
+                      pointBackgroundColor: '#22c55e',
+                      pointRadius: 4,
+                      tension: 0.1,
+                      yAxisID: 'y1'
+                  }
+              ]
+          },
+          options: {
+              responsive: true,
+              interaction: {
+                  mode: 'index',
+                  intersect: false,
+              },
+              plugins: {
+                  legend: { labels: { color: '#cbd5e1' } },
+                  title: { display: true, text: 'Load vs Survival Trend', color: '#fff' },
+                  tooltip: {
+                      callbacks: {
+                          footer: (tooltipItems) => {
+                              let index = tooltipItems[0].dataIndex;
+                              let item = data[index];
+                              return `Status: ${item.Status}\nTarget: ${item.Target}`;
+                          }
+                      }
+                  }
+              },
+              scales: {
+                  x: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                  y: {
+                      type: 'linear',
+                      display: true,
+                      position: 'left',
+                      title: { display: true, text: 'Virtual Users', color: '#38bdf8' },
+                      ticks: { color: '#94a3b8' }, 
+                      grid: { color: '#334155' } 
+                  },
+                  y1: {
+                      type: 'linear',
+                      display: true,
+                      position: 'right',
+                      title: { display: true, text: 'Seconds', color: '#22c55e' },
+                      ticks: { color: '#94a3b8' },
+                      grid: { drawOnChartArea: false }
+                  }
+              }
+          }
+      });
+      setChartInstance(newChart);
+  };
+  
+  const [showGradingInfo, setShowGradingInfo] = useState(false);
+
   return (
     <div className="container mx-auto p-8 max-w-7xl">
       <header className="mb-8 text-center border-b border-green-500 pb-4">
-        <h1 className="text-4xl font-bold text-green-400 tracking-wider">TECHTON <span className="text-white text-sm">v2.2 ENTERPRISE</span></h1>
+        <h1 className="text-4xl font-bold text-green-400 tracking-wider">TECHTON <span className="text-white text-sm">v2.4 ENTERPRISE</span></h1>
         <p className="text-slate-400 mt-2">Active Directory Stress & Resilience Suite</p>
       </header>
+
+      {/* Grading Modal */}
+      {showGradingInfo && (
+          <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onClick={() => setShowGradingInfo(false)}>
+              <div className="bg-slate-800 p-6 rounded-lg max-w-lg border border-slate-600" onClick={e => e.stopPropagation()}>
+                  <h3 className="text-xl font-bold text-white mb-4">Grading Standard Criteria</h3>
+                  <div className="space-y-3 text-sm text-slate-300">
+                      <p><strong className="text-green-400">GRADE A (Excellent):</strong> Server survived full duration, Avg Latency &lt; 2s, Error Rate &lt; 0.1%.</p>
+                      <p><strong className="text-green-400">GRADE B (Good):</strong> Survived full duration, but minor latency spikes or manual stop by user.</p>
+                      <p><strong className="text-yellow-400">GRADE C (Stressed):</strong> Survived but with High Latency (&gt;2s) OR High Error Rate (&gt;5%).</p>
+                      <p><strong className="text-yellow-400">GRADE D (Security Risk):</strong> Security Audit failed (e.g., Anonymous Bind enabled).</p>
+                      <p><strong className="text-red-500">GRADE F (Critical Failure):</strong> Server collapsed/stopped responding before test completion (Survival &lt; Planned Time).</p>
+                  </div>
+                  <button onClick={() => setShowGradingInfo(false)} className="mt-6 w-full bg-slate-700 hover:bg-slate-600 py-2 rounded text-white">Close</button>
+              </div>
+          </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         {/* Configuration Panel */}
         <div className="bg-slate-800 p-6 rounded-lg cyber-border relative overflow-hidden">
           <div className="absolute top-0 left-0 bg-green-500 text-black text-xs font-bold px-2 py-1">CONFIGURATION</div>
+          <button onClick={() => setShowGradingInfo(true)} className="absolute top-2 right-2 text-xs text-slate-400 hover:text-white underline">? Grading Info</button>
           
           <div className="space-y-4 mt-4">
             <div>
@@ -239,6 +390,21 @@ function App() {
                 </div>
             </div>
 
+            {/* Advanced Section */}
+            <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <label className="block text-slate-400 text-[10px] uppercase font-bold mb-2 tracking-widest">Advanced Configuration (Optional)</label>
+                <div>
+                  <label className="block text-green-300 text-xs mb-1">Search Base DN Override</label>
+                  <input 
+                    className="input-field rounded text-xs py-1" 
+                    placeholder="e.g. OU=User,OU=BRIN,DC=net,DC=brin,DC=go,DC=id"
+                    value={config.base_dn} 
+                    onChange={e => setConfig({...config, base_dn: e.target.value})} 
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">If empty, system will attempt auto-discovery from credentials.</p>
+                </div>
+            </div>
+
             {/* Attack Type Toggle */}
             <div className="flex bg-slate-900 rounded p-1">
                 <button 
@@ -258,13 +424,14 @@ function App() {
             {config.attackType === 'single' ? (
                 <>
                     <div>
-                    <label className="block text-green-300 text-sm mb-1">User (DN or Email/UPN)</label>
+                    <label className="block text-green-300 text-sm mb-1">User Credential</label>
                     <input 
                         className="input-field rounded placeholder-slate-500" 
-                        placeholder="e.g. didit@brin.go.id"
+                        placeholder="DOMAIN\Username (e.g. BRIN\dity001)"
                         value={config.user_dn} 
                         onChange={e => setConfig({...config, user_dn: e.target.value})} 
                     />
+                    <p className="text-[10px] text-slate-500 mt-1">Use NetBIOS format (DOMAIN\User). Email format may fail.</p>
                     </div>
 
                     <div>
@@ -397,8 +564,57 @@ function App() {
         </div>
       </div>
       
+      {/* Trend Analysis Section */}
+      <div className="mt-12 mb-8">
+        <h2 className="text-2xl font-bold text-green-400 mb-4">Trend Analysis</h2>
+        <div className="bg-slate-800 p-6 rounded-lg cyber-border">
+            {/* Filters */}
+            <div className="flex flex-wrap gap-4 mb-6">
+                <div>
+                    <label className="block text-xs text-slate-400 mb-1">Filter IP</label>
+                    <select 
+                        className="bg-slate-700 text-white p-2 rounded text-sm border border-slate-600"
+                        value={trendFilter.ip}
+                        onChange={e => setTrendFilter({...trendFilter, ip: e.target.value})}
+                    >
+                        {getUniqueIPs().map(ip => <option key={ip} value={ip}>{ip}</option>)}
+                    </select>
+                </div>
+                <div>
+                    <label className="block text-xs text-slate-400 mb-1">Start Date</label>
+                    <input 
+                        type="date" 
+                        className="bg-slate-700 text-white p-2 rounded text-sm border border-slate-600"
+                        value={trendFilter.startDate}
+                        onChange={e => setTrendFilter({...trendFilter, startDate: e.target.value})}
+                    />
+                </div>
+                <div>
+                    <label className="block text-xs text-slate-400 mb-1">End Date</label>
+                    <input 
+                        type="date" 
+                        className="bg-slate-700 text-white p-2 rounded text-sm border border-slate-600"
+                        value={trendFilter.endDate}
+                        onChange={e => setTrendFilter({...trendFilter, endDate: e.target.value})}
+                    />
+                </div>
+            </div>
+
+            {/* Chart Container */}
+            <div className="relative h-72 w-full">
+                {history.length > 0 ? (
+                    <canvas id="trendChart"></canvas>
+                ) : (
+                    <div className="flex items-center justify-center h-full text-slate-500">
+                        No data available for analysis.
+                    </div>
+                )}
+            </div>
+        </div>
+      </div>
+
       {/* History Section */}
-      <div className="mt-12">
+      <div>
         <div className="flex justify-between items-center mb-4">
             <h2 className="text-2xl font-bold text-green-400">Historical Reports</h2>
             <div className="flex items-center gap-4">
