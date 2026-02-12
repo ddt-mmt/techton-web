@@ -106,6 +106,7 @@ function App() {
 
   const handleStop = async (isAutoStop = false) => {
     if (!isAutoStop) {
+        setLog(prev => [...prev, "--- INITIATING MANUAL ABORT ---"]);
         await fetch('/api/stop', { method: 'POST' });
         setLog(prev => [...prev, "--- ATTACK MANUALLY ABORTED ---"]);
     } else {
@@ -113,8 +114,11 @@ function App() {
     }
     
     setLog(prev => [...prev, "Generating Final Report..."]);
+    setStatus({ status: 'stopped', duration: status.duration }); // Immediate UI feedback
     
-    setTimeout(async () => {
+    // Poll for report
+    let attempts = 0;
+    const pollReport = async () => {
         try {
             const res = await fetch('/api/report');
             if(res.ok) {
@@ -122,29 +126,38 @@ function App() {
                 setReport(data);
                 setLog(prev => [...prev, "REPORT GENERATED SUCCESSFULLY."]);
                 fetchHistory(); // Refresh history
+            } else if (attempts < 5) {
+                attempts++;
+                setTimeout(pollReport, 1000);
             } else {
-                setLog(prev => [...prev, "Failed to generate report."]);
+                setLog(prev => [...prev, "Failed to generate report after multiple attempts."]);
             }
         } catch(e) {
-            setLog(prev => [...prev, "Error fetching report."]);
+            console.error("Report Fetch Error:", e);
+            if (attempts < 5) {
+                attempts++;
+                setTimeout(pollReport, 1000);
+            }
         }
-    }, 1000);
+    };
+    
+    pollReport();
   };
   
   const viewReport = async (run) => {
+    // Path looks like results/run_...
     const runName = run.Path.split('/').filter(Boolean).pop();
     const target = run.Target;
-    const mode = run.Users;
-    const vus = runName.split('_').pop().replace('u', '');
-    const duration = run.Duration;
+    const vus = run.Users;
+    const duration = run.Duration.split('/')[1]?.trim() || run.Duration;
     
     try {
-      const res = await fetch(`/api/reports/view/${runName}?target=${target}&mode=${mode}&vus=${vus}&duration=${duration}s`);
+      const res = await fetch(`/api/reports/view/${runName}?target=${target}&mode=load&vus=${vus}&duration=${duration}`);
       if (res.ok) {
         const reportHtml = await res.text();
         setSelectedReport(reportHtml);
       } else {
-        alert("Failed to load report");
+        alert("Failed to load detailed report. Make sure report_gen.py has run.");
       }
     } catch (err) {
       console.error(err);
@@ -278,6 +291,14 @@ function App() {
                 </div>
             )}
 
+            {status.status === 'running' && (
+                <div className="bg-red-900/30 border border-red-500 p-3 rounded text-xs text-red-200 animate-pulse">
+                    <strong>⚠️ PERINGATAN PEMANTAUAN:</strong> Mohon akses server Active Directory di <strong>{config.target_ip}</strong>. 
+                    Pantau utilisasi CPU dan RAM secara real-time. Jika penggunaan sumber daya mencapai batas kritis atau sistem mengalami latensi tinggi (hang), 
+                    segera klik tombol <strong>STOP</strong> di bawah untuk menjaga stabilitas infrastruktur.
+                </div>
+            )}
+
             <div className="pt-4 flex gap-4">
                 <button 
                     onClick={handleStart}
@@ -290,7 +311,7 @@ function App() {
                 {status.status === 'running' && (
                     <button 
                         onClick={() => handleStop(false)}
-                        className="flex-1 py-3 font-bold rounded bg-red-600 hover:bg-red-500 text-white animate-pulse"
+                        className="flex-1 py-3 font-bold rounded bg-red-600 hover:bg-red-500 text-white"
                     >
                         STOP & REPORT
                     </button>
@@ -322,7 +343,7 @@ function App() {
 
             {/* Console Log */}
             <div className="bg-black p-4 rounded-lg border border-slate-700 h-48 overflow-y-auto font-mono text-xs">
-                <div className="text-slate-500 border-b border-slate-800 mb-2 pb-1">SYSTEM LOG</div>
+                <div className="text-slate-500 border-b border-slate-800 mb-2 pb-1">SYSTEM LOG {status.status === 'running' ? '(ACTIVE)' : ''}</div>
                 {log.map((l, i) => (
                     <div key={i} className="text-green-500">> {l}</div>
                 ))}
@@ -330,7 +351,7 @@ function App() {
             </div>
 
             {/* REPORT CARD (Shows only when report is ready) */}
-            {report && (
+            {report ? (
                 <div className="bg-slate-800 p-6 rounded-lg border-l-4 border-yellow-500 shadow-lg animate-fade-in">
                     <div className="flex justify-between items-start mb-4">
                         <h2 className="text-xl font-bold text-white">📑 EXECUTIVE REPORT</h2>
@@ -340,8 +361,8 @@ function App() {
                     </div>
                     
                     <div className="text-sm text-slate-300 mb-4 font-mono">
-                        <p>{report.summary}</p>
-                        <p className="text-xs text-slate-500">{report.timestamp}</p>
+                        <p className="mb-2 font-bold text-green-400">{report.summary}</p>
+                        <p className="text-xs text-slate-500">Run At: {report.timestamp} | Target: {report.target}</p>
                     </div>
 
                     <div className="grid grid-cols-3 gap-2 mb-4 text-center">
@@ -350,8 +371,8 @@ function App() {
                             <div className="text-[10px] text-slate-400">PEAK USERS</div>
                          </div>
                          <div className="bg-slate-900 p-2 rounded">
-                            <div className="text-lg font-bold text-yellow-400">{report.stats.avg_latency}</div>
-                            <div className="text-[10px] text-slate-400">AVG LATENCY</div>
+                            <div className="text-lg font-bold text-yellow-400">{report.stats.survival_time}</div>
+                            <div className="text-[10px] text-slate-400">SURVIVAL TIME</div>
                          </div>
                          <div className="bg-slate-900 p-2 rounded">
                             <div className="text-lg font-bold text-red-400">{report.stats.error_rate}</div>
@@ -367,6 +388,10 @@ function App() {
                             ))}
                         </ul>
                     </div>
+                </div>
+            ) : status.status === 'stopped' && log.includes("Generating Final Report...") && (
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700 animate-pulse text-center">
+                    <p className="text-green-400">Compiling stress test metrics...</p>
                 </div>
             )}
         </div>
@@ -389,9 +414,10 @@ function App() {
                     <tr>
                         <th className="p-3">Timestamp</th>
                         <th className="p-3">Target</th>
-                        <th className="p-3">Mode</th>
                         <th className="p-3">VUs</th>
-                        <th className="p-3">Duration</th>
+                        <th className="p-3">Duration (Actual/Target)</th>
+                        <th className="p-3">Latency</th>
+                        <th className="p-3">Errors</th>
                         <th className="p-3">Status</th>
                         <th className="p-3"></th>
                     </tr>
@@ -404,6 +430,7 @@ function App() {
                             <td className="p-3">{run.Users}</td>
                             <td className="p-3">{run.Duration}</td>
                             <td className="p-3">{run.AvgLatency}</td>
+                            <td className="p-3">{run.Errors}</td>
                             <td className="p-3">
                                 <span className={`px-2 py-1 text-xs rounded-full ${run.Status === 'PASS' ? 'bg-green-500 text-green-900' : 'bg-red-500 text-red-900'}`}>
                                     {run.Status}
@@ -416,7 +443,7 @@ function App() {
                     ))}
                      {history.length === 0 && (
                         <tr>
-                            <td colSpan="7" className="text-center p-8 text-slate-500">No historical data available.</td>
+                            <td colSpan="8" className="text-center p-8 text-slate-500">No historical data available.</td>
                         </tr>
                     )}
                 </tbody>

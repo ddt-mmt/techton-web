@@ -4,6 +4,7 @@ import signal
 import psutil
 import json
 import time
+import csv
 from datetime import datetime
 
 class TestRunner:
@@ -14,6 +15,7 @@ class TestRunner:
         self.report_start_time = None
         self.manual_stop = False
         self.log_file = "k6_output.json"
+        self.last_report = None
         self.k6_path = os.path.abspath("../techton-project/bin/k6") # Fallback
         if not os.path.exists(self.k6_path):
              # Try system k6
@@ -33,6 +35,7 @@ class TestRunner:
         self.report_start_time = None
         self.report_ready = False # Reset report state
         self.manual_stop = False
+        self.last_report = None
         
         # 1. Prepare Script
         script_content = self._prepare_script(config)
@@ -65,10 +68,18 @@ class TestRunner:
             except subprocess.TimeoutExpired:
                 self.process.kill()
             self.process = None
-            self.report_ready = True # Mark report as ready
+            
             if self.start_time:
                 self.report_start_time = self.start_time
                 self.start_time = None
+            
+            self.report_ready = True # Mark report as ready
+            
+            # Generate and save report
+            report = self.get_report()
+            if report:
+                self._save_to_history(report)
+                
             return True
         return False
 
@@ -126,7 +137,42 @@ class TestRunner:
 
         return script
 
+    def _save_to_history(self, report):
+        history_file = "../techton-project/results/history.csv"
+        if not os.path.exists(os.path.dirname(history_file)):
+            os.makedirs(os.path.dirname(history_file), exist_ok=True)
+
+        file_exists = os.path.isfile(history_file)
+        
+        try:
+            with open(history_file, 'a', newline='') as csvfile:
+                fieldnames = ["Timestamp", "Target", "Users", "Duration", "AvgLatency", "Errors", "Status", "Path"]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                if not file_exists:
+                    writer.writeheader()
+                
+                # Create a run directory name
+                run_name = f"run_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{report['stats']['peak_vus']}u"
+                run_path = f"results/{run_name}"
+                
+                writer.writerow({
+                    "Timestamp": report["timestamp"],
+                    "Target": report["target"],
+                    "Users": report["stats"]["peak_vus"],
+                    "Duration": report["stats"]["survival_time"],
+                    "AvgLatency": report["stats"]["avg_latency"],
+                    "Errors": report["stats"]["error_rate"],
+                    "Status": "PASS" if report["score"] != "F" else "FAIL",
+                    "Path": run_path
+                })
+        except Exception as e:
+            print(f"Error saving to history: {e}")
+
     def get_report(self):
+        if self.last_report:
+            return self.last_report
+
         if not hasattr(self, 'report_ready') or not self.report_ready:
             return None
 
@@ -147,7 +193,7 @@ class TestRunner:
         vus = int(self.current_config.get("vus", 0))
         target = self.current_config.get("target_ip", "Unknown")
         
-        # Did it die early? (Allowing 2s buffer for startup/teardown)
+        # Did it die early? (Allowing 5s buffer for startup/teardown)
         premature_stop = actual_duration < (planned_duration - 5) and not self.manual_stop
         
         score = "B+"
@@ -157,7 +203,7 @@ class TestRunner:
         if self.manual_stop:
             status_msg = f"Test manually stopped after {actual_duration}s."
             recommendations.append("Test was stopped by the user before completion.")
-            score = "N/A"
+            score = "B"
         elif premature_stop:
             score = "F"
             status_msg = f"SERVER DOWN (Collapsed at {actual_duration}s)"
@@ -176,7 +222,7 @@ class TestRunner:
             score = "D"
             recommendations.append("Audit Found: Anonymous Bind Enabled (Security Risk).")
 
-        return {
+        self.last_report = {
             "summary": status_msg,
             "target": target,
             "timestamp": end_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -189,14 +235,21 @@ class TestRunner:
             },
             "recommendations": recommendations
         }
+        return self.last_report
 
     def get_status(self):
         if not self.is_running():
             # If it was running but has now stopped, the test is over.
             if self.start_time is not None:
-                self.report_ready = True
                 self.report_start_time = self.start_time
                 self.start_time = None # Mark as fully stopped
+                self.report_ready = True
+                
+                # Generate and save report
+                report = self.get_report()
+                if report:
+                    self._save_to_history(report)
+                    
                 return {"status": "finished"}
             return {"status": "stopped"}
         
