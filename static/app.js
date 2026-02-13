@@ -16,13 +16,9 @@ function App() {
   const [log, setLog] = useState([]);
   const [report, setReport] = useState(null);
   const [history, setHistory] = useState([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
   const [selectedReport, setSelectedReport] = useState(null);
-
-  const getRecommendedDuration = (vus) => {
-      if (vus <= 50) return "Min. 60s for statistical accuracy.";
-      if (vus <= 500) return "30s-60s is standard.";
-      return "30s should be sufficient for high load.";
-  };
 
   useEffect(() => {
     const ws_protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -142,7 +138,18 @@ function App() {
                 const data = await res.json();
                 setReport(data);
                 setLog(prev => [...prev, "REPORT GENERATED SUCCESSFULLY."]);
-                fetchHistory(); // Refresh history
+                // Ensure history is fetched first
+                fetch('/api/reports/history')
+                    .then(res => res.json())
+                    .then(newHistory => {
+                        setHistory(newHistory); // Update history state
+                        if (newHistory.length > 0) {
+                            // Automatically open the latest report
+                            const latestRun = newHistory[0];
+                            viewReport(latestRun);
+                        }
+                    })
+                    .catch(err => console.error("History Refresh Error:", err));
             } else if (attempts < 5) {
                 attempts++;
                 setTimeout(pollReport, 1000);
@@ -272,6 +279,7 @@ function App() {
           },
           options: {
               responsive: true,
+              maintainAspectRatio: false,
               interaction: {
                   mode: 'index',
                   intersect: false,
@@ -313,37 +321,17 @@ function App() {
       setChartInstance(newChart);
   };
   
-  const [showGradingInfo, setShowGradingInfo] = useState(false);
-
   return (
     <div className="container mx-auto p-8 max-w-7xl">
       <header className="mb-8 text-center border-b border-green-500 pb-4">
-        <h1 className="text-4xl font-bold text-green-400 tracking-wider">TECHTON <span className="text-white text-sm">v2.4 ENTERPRISE</span></h1>
+        <h1 className="text-4xl font-bold text-green-400 tracking-wider">TECHTON <span className="text-white text-sm">v2.5 ENTERPRISE</span></h1>
         <p className="text-slate-400 mt-2">Active Directory Stress & Resilience Suite</p>
       </header>
-
-      {/* Grading Modal */}
-      {showGradingInfo && (
-          <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onClick={() => setShowGradingInfo(false)}>
-              <div className="bg-slate-800 p-6 rounded-lg max-w-lg border border-slate-600" onClick={e => e.stopPropagation()}>
-                  <h3 className="text-xl font-bold text-white mb-4">Grading Standard Criteria</h3>
-                  <div className="space-y-3 text-sm text-slate-300">
-                      <p><strong className="text-green-400">GRADE A (Excellent):</strong> Server survived full duration, Avg Latency &lt; 2s, Error Rate &lt; 0.1%.</p>
-                      <p><strong className="text-green-400">GRADE B (Good):</strong> Survived full duration, but minor latency spikes or manual stop by user.</p>
-                      <p><strong className="text-yellow-400">GRADE C (Stressed):</strong> Survived but with High Latency (&gt;2s) OR High Error Rate (&gt;5%).</p>
-                      <p><strong className="text-yellow-400">GRADE D (Security Risk):</strong> Security Audit failed (e.g., Anonymous Bind enabled).</p>
-                      <p><strong className="text-red-500">GRADE F (Critical Failure):</strong> Server collapsed/stopped responding before test completion (Survival &lt; Planned Time).</p>
-                  </div>
-                  <button onClick={() => setShowGradingInfo(false)} className="mt-6 w-full bg-slate-700 hover:bg-slate-600 py-2 rounded text-white">Close</button>
-              </div>
-          </div>
-      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         {/* Configuration Panel */}
         <div className="bg-slate-800 p-6 rounded-lg cyber-border relative overflow-hidden">
           <div className="absolute top-0 left-0 bg-green-500 text-black text-xs font-bold px-2 py-1">CONFIGURATION</div>
-          <button onClick={() => setShowGradingInfo(true)} className="absolute top-2 right-2 text-xs text-slate-400 hover:text-white underline">? Grading Info</button>
           
           <div className="space-y-4 mt-4">
             <div>
@@ -383,10 +371,9 @@ function App() {
                   <input 
                     className="input-field rounded" 
                     value={config.duration} 
-                    placeholder="e.g., 60s"
+                    placeholder="e.g., 60s, 2m"
                     onChange={e => setConfig({...config, duration: e.target.value})} 
                   />
-                  <p className="text-xs text-slate-500 mt-1">{getRecommendedDuration(config.vus)}</p>
                 </div>
             </div>
 
@@ -459,10 +446,9 @@ function App() {
             )}
 
             {status.status === 'running' && (
-                <div className="bg-red-900/30 border border-red-500 p-3 rounded text-xs text-red-200 animate-pulse">
-                    <strong>⚠️ PERINGATAN PEMANTAUAN:</strong> Mohon akses server Active Directory di <strong>{config.target_ip}</strong>. 
-                    Pantau utilisasi CPU dan RAM secara real-time. Jika penggunaan sumber daya mencapai batas kritis atau sistem mengalami latensi tinggi (hang), 
-                    segera klik tombol <strong>STOP</strong> di bawah untuk menjaga stabilitas infrastruktur.
+                <div className="bg-red-900/30 border border-red-500 p-3 rounded text-xs text-red-200">
+                    <strong>⚠️ MONITORING ADVISORY:</strong> Pantau utilizasi CPU/RAM server <strong>{config.target_ip}</strong>. 
+                    Jika latensi &gt;5s atau terjadi saturasi resource, segera tekan <strong>STOP</strong> untuk mencegah kegagalan layanan (Outage).
                 </div>
             )}
 
@@ -509,7 +495,7 @@ function App() {
             </div>
 
             {/* Console Log */}
-            <div className="bg-black p-4 rounded-lg border border-slate-700 h-48 overflow-y-auto font-mono text-xs">
+            <div className="bg-black p-4 rounded-lg border border-slate-700 h-96 overflow-y-auto font-mono text-xs">
                 <div className="text-slate-500 border-b border-slate-800 mb-2 pb-1">SYSTEM LOG {status.status === 'running' ? '(ACTIVE)' : ''}</div>
                 {log.map((l, i) => (
                     <div key={i} className="text-green-500">> {l}</div>
@@ -519,11 +505,11 @@ function App() {
 
             {/* REPORT CARD (Shows only when report is ready) */}
             {report ? (
-                <div className="bg-slate-800 p-6 rounded-lg border-l-4 border-yellow-500 shadow-lg animate-fade-in">
+                <div className="bg-slate-800 p-6 rounded-lg border-l-4 border-blue-500 shadow-lg animate-fade-in">
                     <div className="flex justify-between items-start mb-4">
                         <h2 className="text-xl font-bold text-white">📑 EXECUTIVE REPORT</h2>
-                        <div className={`text-2xl font-bold px-3 py-1 rounded ${report.score.startsWith('A') ? 'bg-green-600' : report.score === 'F' ? 'bg-red-600' : 'bg-yellow-600'}`}>
-                            GRADE: {report.score}
+                        <div className={`text-xl font-bold px-3 py-1 rounded ${report.status === 'COMPLETED' || report.status === 'STABLE' ? 'bg-green-600' : 'bg-red-600'}`}>
+                            STATUS: {report.status}
                         </div>
                     </div>
                     
@@ -548,11 +534,11 @@ function App() {
                     </div>
 
                     <div className="bg-slate-900 p-4 rounded border border-slate-700">
-                        <h4 className="text-yellow-400 font-bold text-xs mb-2 uppercase">⚠️ Recommendations</h4>
+                        <h4 className="text-blue-400 font-bold text-xs mb-2 uppercase">🔍 Technical Analysis</h4>
                         <ul className="list-disc pl-4 space-y-1">
-                            {report.recommendations.map((rec, i) => (
+                            {report.recommendations.length > 0 ? report.recommendations.map((rec, i) => (
                                 <li key={i} className="text-xs text-slate-300">{rec}</li>
-                            ))}
+                            )) : <li className="text-xs text-slate-500">No specific issues detected.</li>}
                         </ul>
                     </div>
                 </div>
@@ -565,9 +551,9 @@ function App() {
       </div>
       
       {/* Trend Analysis Section */}
-      <div className="mt-12 mb-8">
-        <h2 className="text-2xl font-bold text-green-400 mb-4">Trend Analysis</h2>
-        <div className="bg-slate-800 p-6 rounded-lg cyber-border">
+      <div className="mt-8 mb-8">
+        <h2 className="text-xl font-bold text-green-400 mb-4 px-1">Trend Analysis</h2>
+        <div className="bg-slate-800 p-6 rounded-lg border border-slate-700 w-full">
             {/* Filters */}
             <div className="flex flex-wrap gap-4 mb-6">
                 <div>
@@ -601,7 +587,7 @@ function App() {
             </div>
 
             {/* Chart Container */}
-            <div className="relative h-72 w-full">
+            <div className="relative h-96 w-full">
                 {history.length > 0 ? (
                     <canvas id="trendChart"></canvas>
                 ) : (
@@ -639,16 +625,18 @@ function App() {
                     </tr>
                 </thead>
                 <tbody>
-                    {history.map((run, i) => (
+                    {history.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((run, i) => (
                         <tr key={i} className="border-b border-slate-700 hover:bg-slate-700">
                             <td className="p-3 font-mono">{run.Timestamp}</td>
                             <td className="p-3 font-mono">{run.Target}</td>
                             <td className="p-3">{run.Users}</td>
-                            <td className="p-3">{run.Duration}</td>
+                            <td className={`p-3 font-mono ${parseInt(run.Duration.split('/')[0]) > parseInt(run.Duration.split('/')[1]) + 10 ? 'text-red-400' : 'text-slate-300'}`}>
+                                {run.Duration}
+                            </td>
                             <td className="p-3">{run.AvgLatency}</td>
                             <td className="p-3">{run.Errors}</td>
                             <td className="p-3">
-                                <span className={`px-2 py-1 text-xs rounded-full ${run.Status === 'PASS' ? 'bg-green-500 text-green-900' : 'bg-red-500 text-red-900'}`}>
+                                <span className={`px-2 py-1 text-xs rounded-full font-bold ${['PASS', 'COMPLETED', 'STABLE', 'SUCCESS'].includes(run.Status?.toUpperCase()) ? 'bg-green-500/20 text-green-400 border border-green-500' : 'bg-red-500/20 text-red-400 border border-red-500'}`}>
                                     {run.Status}
                                 </span>
                             </td>
@@ -664,6 +652,27 @@ function App() {
                     )}
                 </tbody>
             </table>
+        </div>
+        
+        {/* Pagination Controls */}
+        <div className="flex justify-between items-center mt-4 px-2">
+            <button 
+                onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                disabled={currentPage === 1}
+                className={`px-4 py-2 text-xs font-bold rounded ${currentPage === 1 ? 'bg-slate-800 text-slate-600 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-white'}`}
+            >
+                Previous
+            </button>
+            <span className="text-slate-400 text-xs font-mono">
+                Page {currentPage} of {Math.max(1, Math.ceil(history.length / itemsPerPage))}
+            </span>
+            <button 
+                onClick={() => setCurrentPage(prev => Math.min(prev + 1, Math.ceil(history.length / itemsPerPage)))}
+                disabled={currentPage >= Math.ceil(history.length / itemsPerPage)}
+                className={`px-4 py-2 text-xs font-bold rounded ${currentPage >= Math.ceil(history.length / itemsPerPage) ? 'bg-slate-800 text-slate-600 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-white'}`}
+            >
+                Next
+            </button>
         </div>
       </div>
       
