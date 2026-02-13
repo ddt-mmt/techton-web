@@ -1,6 +1,8 @@
 import ldap from 'k6/x/ldap';
 import { check, sleep } from 'k6';
 import { SharedArray } from 'k6/data';
+import encoding from 'k6/encoding';
+import { vu } from 'k6';
 
 // --- CONFIGURATION ---
 const target_ip = '__TARGET_IP__';
@@ -8,6 +10,22 @@ const use_csv = __USE_CSV__;
 const single_user_dn = '__USER_DN__';
 const single_password = '__PASSWORD__';
 const override_base_dn = '__BASE_DN__';
+
+let users = null;
+if (use_csv) {
+    users = new SharedArray('users_from_csv', function () {
+        // Load CSV file from the root of the test run directory (where k6 is executed)
+        const csvData = open('./users.csv'); 
+        const parsedData = csvData.split(/\r\n|\n/).map(s => s.trim()).filter(s => s.length > 0).map(line => {
+            const parts = line.split(',');
+            return {
+                username: parts[0].trim(),
+                password: parts[1].trim()
+            };
+        });
+        return parsedData;
+    });
+}
 
 export const options = {
   scenarios: {
@@ -21,6 +39,13 @@ export default function () {
 
   let dn = single_user_dn;
   let pass = single_password;
+
+  if (use_csv && users && users.length > 0) {
+      const userIndex = vu.idInTest % users.length;
+      dn = users[userIndex].username;
+      pass = users[userIndex].password;
+  }
+
 
   let client = null;
   

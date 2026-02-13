@@ -36,19 +36,8 @@ class TestRunner:
             return False
         return self.process.poll() is None
 
-    def start_test(self, config):
-        if self.is_running():
-            raise Exception("Test already running")
-
-        self.current_config = config
-        self.start_time = datetime.now()
-        self.report_start_time = None
-        self.report_ready = False # Reset report state
-        self.manual_stop = False
-        self.last_report = None
-        
-        # 1. Prepare Run Directory
-        vus = config.get("vus", 0)
+    def _create_run_directory(self, vus):
+        self.start_time = datetime.now() # Move start time definition here
         run_name = f"run_{self.start_time.strftime('%Y-%m-%d_%H-%M-%S')}_{vus}u"
         
         # Absolute path to results dir
@@ -61,7 +50,24 @@ class TestRunner:
         # Define outputs
         self.run_csv = os.path.join(self.run_dir, "k6_metrics.csv")
         self.run_json = os.path.join(self.run_dir, "k6_summary.json")
+        return self.run_dir
+
+    def start_test(self, config):
+        if self.is_running():
+            raise Exception("Test already running")
+
+        self.current_config = config
+        self.report_start_time = None
+        self.report_ready = False # Reset report state
+        self.manual_stop = False
+        self.last_report = None
         
+        # 1. Prepare Run Directory (Moved to _create_run_directory)
+        # vus is already in config, but we need it for run_name.
+        # This assumes _create_run_directory is called externally, or we call it here
+        if not hasattr(self, 'run_dir') or not self.run_dir:
+            self._create_run_directory(config.get("vus", 0))
+
         # 2. Prepare Script
         script_content = self._prepare_script(config)
         script_path = os.path.join(self.run_dir, "load_test.js")
@@ -153,7 +159,7 @@ class TestRunner:
         raw_pass = config.get("password") or "guest"
         password = str(raw_pass).replace("\\", "\\\\")
         
-        use_csv = str(config.get("use_csv", False)).lower()
+        use_csv = "true" if config.get("use_csv", False) else "false"
         base_dn = config.get("base_dn") or ""
         
         # Scenario Construction
@@ -298,15 +304,10 @@ class TestRunner:
         logs = []
         if self.run_log_file and os.path.exists(self.run_log_file):
             try:
-                # Read last few lines for real-time feedback
                 with open(self.run_log_file, "r") as f:
-                    # Simple tail implementation
-                    # Seek to end and read back a bit, or just read all if small.
-                    # Since logs rotate per run (we append), it might get big. 
-                    # Let's just read the last 2KB.
                     f.seek(0, os.SEEK_END)
                     file_size = f.tell()
-                    seek_offset = 2000
+                    seek_offset = 2000 
                     if file_size > seek_offset:
                         f.seek(file_size - seek_offset)
                     else:
@@ -314,11 +315,24 @@ class TestRunner:
                     
                     content = f.read()
                     lines = content.split('\n')
-                    # Filter empty lines and take last 3 non-empty
-                    logs = [l for l in lines if l.strip()][-3:]
+                    logs = [l for l in lines if l.strip()][-5:] # Read more lines for better detection
             except Exception:
                 pass
 
+        # Check for k6 completion marker in logs
+        if not self.report_ready and any("stress_test ✓ [ 100% ]" in l for l in logs):
+            if self.start_time is not None: # Ensure a test was actually started
+                self.report_start_time = self.start_time
+                self.start_time = None # Mark as conceptually stopped
+            self.report_ready = True
+            
+            # Generate and save report immediately
+            report = self.get_report()
+            if report:
+                self._save_to_history(report)
+            
+            return {"status": "finished", "logs": logs}
+            
         if not self.is_running():
             # If it was running but has now stopped, the test is over.
             if self.start_time is not None:

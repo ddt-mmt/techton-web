@@ -33,25 +33,27 @@ async def start_test(
     csv_file: UploadFile = File(None)
 ):
     try:
+        # 1. Create run directory first
+        runner._create_run_directory(vus) # This will set runner.run_dir and runner.start_time
+        
         config = {
             "target_ip": target_ip,
             "vus": vus,
             "duration": duration,
             "mode": mode,
-            "base_dn": base_dn, # Pass it
+            "base_dn": base_dn,
             "user_dn": user_dn,
             "password": password,
             "use_csv": use_csv,
-            "csv_path": None
+            "csv_path": None # This is no longer strictly needed in config
         }
 
         if use_csv and csv_file:
-            # Save uploaded CSV
-            file_location = "users.csv"
+            file_location = os.path.join(runner.run_dir, "users.csv")
             with open(file_location, "wb+") as file_object:
                 shutil.copyfileobj(csv_file.file, file_object)
-            config["csv_path"] = os.path.abspath(file_location)
-
+            # config["csv_path"] = file_location # K6 script will find it by relative path now
+        
         runner.start_test(config)
         return {"status": "started"}
     except Exception as e:
